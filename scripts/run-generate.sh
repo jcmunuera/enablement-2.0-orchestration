@@ -230,6 +230,7 @@ plan_file = '${PLAN_FILE}'
 context_file = '${CONTEXT_FILE}'
 output_dir = '${OUTPUT_DIR}'
 script_dir = '${SCRIPT_DIR}'
+kb_dir = '${KB_DIR}'
 
 with open(plan_file) as f:
     plan = json.load(f)
@@ -399,6 +400,23 @@ for phase in plan.get('phases', []):
                 else:
                     print(f"  ✓ Completed")
                     results.append({'subphase_id': subphase_id, 'status': 'success', 'files': 0})
+                
+                # ─── ODEC-023: Compilation Gate with Fix Loop ─────────────
+                compile_script = os.path.join(script_dir, 'run-compile-fix.sh')
+                if os.path.exists(compile_script):
+                    print(f"\n  ── Compilation Gate ──")
+                    compile_cmd = [compile_script, subphase_id, output_dir, context_file, kb_dir]
+                    compile_result = subprocess.run(compile_cmd, capture_output=False)
+                    if compile_result.returncode != 0:
+                        print(f"  ⚠ Compilation gate failed for {subphase_id} — continuing pipeline")
+                        # Update result status
+                        for r in results:
+                            if r['subphase_id'] == subphase_id:
+                                r['compile_status'] = 'fail'
+                    else:
+                        for r in results:
+                            if r['subphase_id'] == subphase_id:
+                                r['compile_status'] = 'pass'
             else:
                 print(f"  ✗ Failed (exit code: {result.returncode})")
                 # Save full output to trace for debugging

@@ -8,6 +8,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added - 2026-02-05
+
+- **ODEC-022: Transform Agent for Phase 3 Cross-Cutting**
+  - New script: `scripts/run-transform.sh` - executes cross-cutting transforms
+  - New agent doc: `agents/transform-agent.md`
+  - Reads transform descriptors from KB modules (DEC-028, DEC-030)
+  - Topological sort of modules by `depends_on` for execution order
+  - Holistic execution: all transforms in single LLM call (per ODEC-011)
+  - Same interface as run-codegen.sh: `./run-transform.sh <subphase_id> <plan> <context> <output_dir>`
+  - Designed for future hybrid execution (LLM + deterministic per action type)
+
 ### Added - 2026-02-04
 
 - **DEC-042: Stack-Specific Style Files**

@@ -17,6 +17,7 @@ Este documento registra las decisiones de diseño del sistema de orquestación d
 - [ODEC-018](#odec-018) - Inter-Phase Coherence Model
 - [ODEC-020](#odec-020) - Template Manifest for Determinism
 - [ODEC-021](#odec-021) - Phase 2 Reproducibility Rules
+- [ODEC-022](#odec-022) - Transform Agent for Phase 3 Cross-Cutting
 
 ---
 
@@ -368,4 +369,125 @@ normalized_content = content.rstrip() + '\n'
 
 ---
 
+## ODEC-022: Transform Agent for Phase 3 Cross-Cutting {#odec-022}
+
+**Fecha:** 2026-02-05  
+**Estado:** ✅ Implementado
+
+**Contexto:**  
+Phase 3 (cross-cutting) requires transforming existing code generated in Phase 1 & 2, not generating new files from templates. The KB has transform descriptors (DEC-028, DEC-030) for resilience modules (circuit-breaker, retry, timeout) but no orchestration script to execute them.
+
+**Problema:**
+- `run-generate.sh` already routes `action="transform"` subphases to `run-transform.sh`, but the script didn't exist
+- Transforms are fundamentally different from generation: modify existing code vs create from templates
+- Execution order matters (circuit-breaker before retry, per `depends_on`)
+
+**Opciones:**
+- A) LLM-driven: Load existing code + transform descriptors → LLM applies all transformations → write modified files
+- B) Script-driven: Parse Java AST, apply transformations deterministically, no LLM
+- C) Hybrid: Deterministic for simple actions (add_imports), LLM for complex (add_fallback_methods)
+
+**Decisión:** Opción A for PoC, designed for future migration to C.
+
+**Justificación:**
+- Consistent with CodeGen Agent pattern (LLM call → JSON result → write files)
+- Transform descriptors have typed actions that can be individually migrated to deterministic execution
+- Descriptor format is the stable contract; execution engine is interchangeable per action
+- Enables incremental migration: start all-LLM, move actions to scripts as needed
+
+**Implementación:**
+- New script: `scripts/run-transform.sh`
+- New agent doc: `agents/transform-agent.md`
+- Interface: `./run-transform.sh <subphase_id> <plan> <context> <output_dir>` (same as run-codegen.sh)
+- Holistic execution: all transforms in subphase applied in single LLM call (per ODEC-011)
+- Topological sort of modules by `depends_on` for execution order
+
+**Archivos creados:**
+- `scripts/run-transform.sh` - Transform Agent script
+- `agents/transform-agent.md` - Agent documentation
+
+---
+
 ## Pending Decisions
+
+### ODEC-018 Step 3: Compilation Gate (not yet implemented)
+
+Designed but not implemented. Would run `mvn compile` after each phase.
+
+### ODEC-019: Static Template Lint (proposed)
+
+Pre-generation validation of .tpl files. Proposed, not implemented.
+
+---
+
+## ODEC-023: Compilation Gate with LLM Fix Loop {#odec-023}
+
+**Fecha:** 2026-02-05  
+**Estado:** ✅ Implementado
+
+**Contexto:**  
+LLM-generated code occasionally contains compilation errors (wrong imports, type mismatches, missing symbols) due to statistical variance. These are detectable by the compiler and fixable with targeted LLM intervention.
+
+**Problema:**
+- Phase 1/2/3 generate code that may not compile on first pass
+- Errors are typically small (wrong import path, missing import) but block the pipeline
+- Adding technology-specific post-processing to stack-agnostic agents violates architecture
+- Manual intervention breaks automation goals
+
+**Opciones:**
+- A) Post-processing rules hardcoded per stack in agents — **Rejected** (agents must be stack-agnostic)
+- B) Style file rules only — **Insufficient** (LLM may still ignore)
+- C) Separate compile-fix script with bounded LLM correction loop — **Selected**
+
+**Decisión:** Opción C — `run-compile-fix.sh` as autonomous compilation gate.
+
+**Diseño:**
+
+```
+run-generate.sh
+  │
+  ├── run-codegen.sh (Phase 1.1)
+  │     └── run-compile-fix.sh ← mvn compile+test → pass/fix loop
+  │
+  ├── run-codegen.sh (Phase 2.1)
+  │     └── run-compile-fix.sh ← mvn compile+test → pass/fix loop
+  │
+  └── run-transform.sh (Phase 3.1)
+        └── run-compile-fix.sh ← mvn compile+test → pass/fix loop
+```
+
+**Parámetros:**
+- Max iterations: 3
+- Compile command: `mvn clean compile test`
+- LLM model: claude-sonnet-4-20250514 (fast, focused fixes)
+- Temperature: 0 (deterministic fixes)
+
+**Flujo por iteración:**
+
+```
+1. mvn clean compile test
+     ├── BUILD SUCCESS → exit 0 (pass)
+     └── BUILD FAILURE →
+           ├── Extract errors from Maven log
+           ├── Read source files with errors
+           ├── Send to LLM: errors + code + style rules
+           ├── Apply fixes (only changed files)
+           └── Loop (max 3)
+```
+
+**Principios:**
+- Agentes (codegen, transform) permanecen agnósticos al stack
+- El compile-fix es el único punto que ejecuta herramientas de stack (mvn)
+- LLM fix recibe style rules (DEC-042) para mantener consistencia
+- Fix prompt usa temperature=0 y reglas estrictas: "fix ONLY errors, do NOT refactor"
+- Todas las iteraciones se trazan en `.trace/compile-*`
+
+**Archivos:**
+- `scripts/run-compile-fix.sh` — Script del compilation gate
+- Integrado en `scripts/run-generate.sh` — Invocado tras cada subphase
+
+**Trazabilidad:**
+- `.trace/compile-{subphase}-iter{N}.log` — Maven output por iteración
+- `.trace/compile-fix-prompt-{subphase}-iter{N}.txt` — Prompt enviado al LLM
+- `.trace/compile-fix-response-{subphase}-iter{N}.json` — Respuesta del LLM
+- `.trace/compile-gate-{subphase}.json` — Resultado final (pass/fail, iterations)
